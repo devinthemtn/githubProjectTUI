@@ -34,7 +34,16 @@ type ProjectItem struct {
 	URL       string
 	CreatedAt time.Time
 	UpdatedAt time.Time
+	Assignees []string // Assignee logins
+	Comments  []Comment
 	Fields    map[string]interface{}
+}
+
+// Comment represents a comment on an item
+type Comment struct {
+	Author    string
+	Body      string
+	CreatedAt time.Time
 }
 
 // ProjectField represents a custom field in a project
@@ -72,9 +81,10 @@ type UpdateProjectInput struct {
 // CreateItemInput represents input for creating a new project item
 type CreateItemInput struct {
 	ProjectID   string
-	ContentID   string // Optional: ID of issue/PR to add
-	Title       string // For draft issues
-	Body        string // For draft issues
+	ContentID   string   // Optional: ID of issue/PR to add
+	Title       string   // For draft issues
+	Body        string   // For draft issues
+	AssigneeIDs []string // Optional: User node IDs to assign
 }
 
 // UpdateItemInput represents input for updating a project item

@@ -26,6 +26,20 @@ func (c *Client) ListProjectItems(projectID string, first int) ([]models.Project
 								url
 								createdAt
 								updatedAt
+								assignees(first: 10) {
+									nodes {
+										login
+									}
+								}
+								comments(first: 50) {
+									nodes {
+										author {
+											login
+										}
+										body
+										createdAt
+									}
+								}
 							}
 							... on PullRequest {
 								title
@@ -35,12 +49,31 @@ func (c *Client) ListProjectItems(projectID string, first int) ([]models.Project
 								url
 								createdAt
 								updatedAt
+								assignees(first: 10) {
+									nodes {
+										login
+									}
+								}
+								comments(first: 50) {
+									nodes {
+										author {
+											login
+										}
+										body
+										createdAt
+									}
+								}
 							}
 							... on DraftIssue {
 								title
 								body
 								createdAt
 								updatedAt
+								assignees(first: 10) {
+									nodes {
+										login
+									}
+								}
 							}
 						}
 					}
@@ -61,14 +94,28 @@ func (c *Client) ListProjectItems(projectID string, first int) ([]models.Project
 					ID      string `json:"id"`
 					Type    string `json:"type"`
 					Content struct {
-						TypeName    string    `json:"__typename"`
-						Title       string    `json:"title"`
-						Body        string    `json:"body"`
-						Number      int       `json:"number,omitempty"`
-						State       string    `json:"state,omitempty"`
-						URL         string    `json:"url,omitempty"`
-						CreatedAt   time.Time `json:"createdAt"`
-						UpdatedAt   time.Time `json:"updatedAt"`
+						TypeName  string    `json:"__typename"`
+						Title     string    `json:"title"`
+						Body      string    `json:"body"`
+						Number    int       `json:"number,omitempty"`
+						State     string    `json:"state,omitempty"`
+						URL       string    `json:"url,omitempty"`
+						CreatedAt time.Time `json:"createdAt"`
+						UpdatedAt time.Time `json:"updatedAt"`
+						Assignees struct {
+							Nodes []struct {
+								Login string `json:"login"`
+							} `json:"nodes"`
+						} `json:"assignees,omitempty"`
+						Comments struct {
+							Nodes []struct {
+								Author struct {
+									Login string `json:"login"`
+								} `json:"author"`
+								Body      string    `json:"body"`
+								CreatedAt time.Time `json:"createdAt"`
+							} `json:"nodes"`
+						} `json:"comments,omitempty"`
 					} `json:"content"`
 				} `json:"nodes"`
 			} `json:"items"`
@@ -82,6 +129,20 @@ func (c *Client) ListProjectItems(projectID string, first int) ([]models.Project
 
 	items := make([]models.ProjectItem, 0)
 	for _, node := range response.Node.Items.Nodes {
+		assignees := make([]string, len(node.Content.Assignees.Nodes))
+		for i, assignee := range node.Content.Assignees.Nodes {
+			assignees[i] = assignee.Login
+		}
+
+		comments := make([]models.Comment, len(node.Content.Comments.Nodes))
+		for i, comment := range node.Content.Comments.Nodes {
+			comments[i] = models.Comment{
+				Author:    comment.Author.Login,
+				Body:      comment.Body,
+				CreatedAt: comment.CreatedAt,
+			}
+		}
+
 		item := models.ProjectItem{
 			ID:        node.ID,
 			Type:      node.Content.TypeName,
@@ -92,6 +153,8 @@ func (c *Client) ListProjectItems(projectID string, first int) ([]models.Project
 			URL:       node.Content.URL,
 			CreatedAt: node.Content.CreatedAt,
 			UpdatedAt: node.Content.UpdatedAt,
+			Assignees: assignees,
+			Comments:  comments,
 			Fields:    make(map[string]interface{}),
 		}
 		items = append(items, item)
@@ -138,6 +201,7 @@ func (c *Client) AddProjectItem(input models.CreateItemInput) (*models.ProjectIt
 }
 
 // CreateDraftIssue creates a draft issue in a project
+// Note: assignees cannot be set during creation, use UpdateDraftIssue afterward
 func (c *Client) CreateDraftIssue(input models.CreateItemInput) (*models.ProjectItem, error) {
 	mutation := `mutation($input: AddProjectV2DraftIssueInput!) {
 		addProjectV2DraftIssue(input: $input) {
@@ -154,12 +218,14 @@ func (c *Client) CreateDraftIssue(input models.CreateItemInput) (*models.Project
 		}
 	}`
 
+	mutationInput := map[string]interface{}{
+		"projectId": input.ProjectID,
+		"title":     input.Title,
+		"body":      input.Body,
+	}
+
 	variables := map[string]interface{}{
-		"input": map[string]interface{}{
-			"projectId": input.ProjectID,
-			"title":     input.Title,
-			"body":      input.Body,
-		},
+		"input": mutationInput,
 	}
 
 	var response struct {
@@ -186,13 +252,14 @@ func (c *Client) CreateDraftIssue(input models.CreateItemInput) (*models.Project
 		Title:     response.AddProjectV2DraftIssue.ProjectItem.Content.Title,
 		Body:      response.AddProjectV2DraftIssue.ProjectItem.Content.Body,
 		CreatedAt: response.AddProjectV2DraftIssue.ProjectItem.Content.CreatedAt,
+		Assignees: []string{}, // Will be empty on creation
 	}
 
 	return item, nil
 }
 
 // UpdateDraftIssue updates a draft issue
-func (c *Client) UpdateDraftIssue(itemID, title, body string) (*models.ProjectItem, error) {
+func (c *Client) UpdateDraftIssue(itemID, title, body string, assigneeIDs []string) (*models.ProjectItem, error) {
 	mutation := `mutation($input: UpdateProjectV2DraftIssueInput!) {
 		updateProjectV2DraftIssue(input: $input) {
 			draftIssue {
@@ -200,6 +267,11 @@ func (c *Client) UpdateDraftIssue(itemID, title, body string) (*models.ProjectIt
 				title
 				body
 				updatedAt
+				assignees(first: 10) {
+					nodes {
+						login
+					}
+				}
 			}
 		}
 	}`
@@ -214,6 +286,9 @@ func (c *Client) UpdateDraftIssue(itemID, title, body string) (*models.ProjectIt
 	if body != "" {
 		mutationInput["body"] = body
 	}
+	if len(assigneeIDs) > 0 {
+		mutationInput["assigneeIds"] = assigneeIDs
+	}
 
 	variables := map[string]interface{}{
 		"input": mutationInput,
@@ -226,6 +301,11 @@ func (c *Client) UpdateDraftIssue(itemID, title, body string) (*models.ProjectIt
 				Title     string    `json:"title"`
 				Body      string    `json:"body"`
 				UpdatedAt time.Time `json:"updatedAt"`
+				Assignees struct {
+					Nodes []struct {
+						Login string `json:"login"`
+					} `json:"nodes"`
+				} `json:"assignees"`
 			} `json:"draftIssue"`
 		} `json:"updateProjectV2DraftIssue"`
 	}
@@ -235,12 +315,18 @@ func (c *Client) UpdateDraftIssue(itemID, title, body string) (*models.ProjectIt
 		return nil, fmt.Errorf("failed to update draft issue: %w", err)
 	}
 
+	assignees := make([]string, len(response.UpdateProjectV2DraftIssue.DraftIssue.Assignees.Nodes))
+	for i, node := range response.UpdateProjectV2DraftIssue.DraftIssue.Assignees.Nodes {
+		assignees[i] = node.Login
+	}
+
 	item := &models.ProjectItem{
 		ID:        response.UpdateProjectV2DraftIssue.DraftIssue.ID,
 		Type:      "DraftIssue",
 		Title:     response.UpdateProjectV2DraftIssue.DraftIssue.Title,
 		Body:      response.UpdateProjectV2DraftIssue.DraftIssue.Body,
 		UpdatedAt: response.UpdateProjectV2DraftIssue.DraftIssue.UpdatedAt,
+		Assignees: assignees,
 	}
 
 	return item, nil

@@ -26,8 +26,9 @@ type ProjectDetailModel struct {
 func NewProjectDetailModel(project models.Project, items []models.ProjectItem) ProjectDetailModel {
 	columns := []table.Column{
 		{Title: "Type", Width: 12},
-		{Title: "Title", Width: 50},
-		{Title: "Status", Width: 15},
+		{Title: "Title", Width: 40},
+		{Title: "Assignees", Width: 20},
+		{Title: "Status", Width: 12},
 		{Title: "Number", Width: 10},
 	}
 
@@ -48,9 +49,21 @@ func NewProjectDetailModel(project models.Project, items []models.ProjectItem) P
 			number = fmt.Sprintf("#%d", item.Number)
 		}
 
+		// Format assignees as comma-separated list with @ prefix
+		assignees := "-"
+		if len(item.Assignees) > 0 {
+			assigneeList := make([]string, len(item.Assignees))
+			for j, a := range item.Assignees {
+				assigneeList[j] = "@" + a
+			}
+			assignees = strings.Join(assigneeList, ", ")
+			assignees = truncate(assignees, 20)
+		}
+
 		rows[i] = table.Row{
 			itemType,
-			truncate(item.Title, 50),
+			truncate(item.Title, 40),
+			assignees,
 			status,
 			number,
 		}
@@ -102,15 +115,27 @@ func (m ProjectDetailModel) Update(msg tea.Msg) (ProjectDetailModel, tea.Cmd) {
 		m.table.SetHeight(tableHeight)
 		
 		// Adjust column widths based on terminal width
-		titleWidth := msg.Width - 40  // Reserve 40 chars for other columns
-		if titleWidth < 30 {
-			titleWidth = 30
+		availableWidth := msg.Width - 10
+		if availableWidth < 60 {
+			availableWidth = 60
 		}
+		
+		// Calculate column widths proportionally
+		typeWidth := 12
+		numberWidth := 10
+		statusWidth := 12
+		assigneesWidth := 20
+		titleWidth := availableWidth - typeWidth - numberWidth - statusWidth - assigneesWidth - 10
+		if titleWidth < 20 {
+			titleWidth = 20
+		}
+		
 		m.table.SetColumns([]table.Column{
-			{Title: "Type", Width: 12},
+			{Title: "Type", Width: typeWidth},
 			{Title: "Title", Width: titleWidth},
-			{Title: "Status", Width: 15},
-			{Title: "Number", Width: 10},
+			{Title: "Assignees", Width: assigneesWidth},
+			{Title: "Status", Width: statusWidth},
+			{Title: "Number", Width: numberWidth},
 		})
 		return m, nil
 

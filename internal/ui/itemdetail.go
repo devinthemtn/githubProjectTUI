@@ -120,6 +120,13 @@ func (m ItemDetailModel) View() string {
 	b.WriteString(itemDetailMetaStyle.Render(strings.Join(metaParts, " • ")))
 	b.WriteString("\n")
 
+	// Assignees
+	if len(m.item.Assignees) > 0 {
+		assigneeList := strings.Join(m.item.Assignees, ", @")
+		b.WriteString(itemDetailMetaStyle.Render(fmt.Sprintf("Assignees: @%s", assigneeList)))
+		b.WriteString("\n")
+	}
+
 	// Description
 	if m.item.Body != "" {
 		b.WriteString(itemDetailLabelStyle.Render("Description:"))
@@ -138,6 +145,57 @@ func (m ItemDetailModel) View() string {
 	} else {
 		b.WriteString(itemDetailMetaStyle.Render("(No description)"))
 		b.WriteString("\n\n")
+	}
+
+	// Comments section
+	if len(m.item.Comments) > 0 {
+		b.WriteString(itemDetailLabelStyle.Render(fmt.Sprintf("Comments (%d):", len(m.item.Comments))))
+		b.WriteString("\n")
+
+		commentBoxStyle := lipgloss.NewStyle().
+			Border(lipgloss.RoundedBorder()).
+			BorderForeground(lipgloss.Color("#444444")).
+			Padding(0, 1).
+			MarginLeft(2).
+			MarginTop(1)
+
+		commentAuthorStyle := lipgloss.NewStyle().
+			Bold(true).
+			Foreground(lipgloss.Color("#7D56F4"))
+
+		commentTimeStyle := lipgloss.NewStyle().
+			Foreground(lipgloss.Color("#888888"))
+
+		// Show up to 5 most recent comments
+		maxComments := len(m.item.Comments)
+		if maxComments > 5 {
+			maxComments = 5
+		}
+
+		for i := len(m.item.Comments) - maxComments; i < len(m.item.Comments); i++ {
+			comment := m.item.Comments[i]
+			var commentText strings.Builder
+			
+			commentText.WriteString(commentAuthorStyle.Render("@" + comment.Author))
+			commentText.WriteString(" ")
+			commentText.WriteString(commentTimeStyle.Render(formatTime(comment.CreatedAt)))
+			commentText.WriteString("\n")
+			
+			boxWidth := m.width - 10
+			if boxWidth < 40 {
+				boxWidth = 40
+			}
+			wrapped := wordWrap(comment.Body, boxWidth-4)
+			commentText.WriteString(wrapped)
+
+			b.WriteString(commentBoxStyle.Width(boxWidth).Render(commentText.String()))
+			b.WriteString("\n")
+		}
+
+		if len(m.item.Comments) > 5 {
+			b.WriteString(itemDetailMetaStyle.Render(fmt.Sprintf("... and %d more comments", len(m.item.Comments)-5)))
+			b.WriteString("\n")
+		}
 	}
 
 	// Timestamps

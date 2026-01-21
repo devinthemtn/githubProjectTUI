@@ -135,7 +135,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case CreateItemMsg:
-		m.itemEditor = NewItemEditorModel(msg.Project, nil)
+		m.itemEditor = NewItemEditorModel(msg.Project, m.currentOwner, !m.currentIsUser, nil)
 		m.itemEditor.width = m.width
 		m.itemEditor.height = m.height
 		m.currentView = viewItemEditor
@@ -156,7 +156,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, m.projectCreator.Init()
 
 	case EditItemMsg:
-		m.itemEditor = NewItemEditorModel(models.Project{}, &msg.Item)
+		m.itemEditor = NewItemEditorModel(models.Project{}, m.currentOwner, !m.currentIsUser, &msg.Item)
 		m.itemEditor.width = m.width
 		m.itemEditor.height = m.height
 		m.currentView = viewItemEditor
@@ -438,17 +438,36 @@ func loadProjectItems(client *api.Client, project models.Project) tea.Cmd {
 
 func saveItem(client *api.Client, msg SaveItemMsg) tea.Cmd {
 	return func() tea.Msg {
+		// Get assignee node ID if username provided
+		var assigneeIDs []string
+		if msg.Assignee != "" {
+			nodeID, err := client.GetUserNodeID(msg.Assignee)
+			if err != nil {
+				return ErrorMsg{Err: fmt.Errorf("failed to get user ID for %s: %w", msg.Assignee, err)}
+			}
+			assigneeIDs = []string{nodeID}
+		}
+
 		if msg.IsNewItem {
-			_, err := client.CreateDraftIssue(models.CreateItemInput{
-				ProjectID: msg.Project.ID,
-				Title:     msg.Title,
-				Body:      msg.Body,
+			// Create draft issue (without assignees initially)
+			item, err := client.CreateDraftIssue(models.CreateItemInput{
+				ProjectID:   msg.Project.ID,
+				Title:       msg.Title,
+				Body:        msg.Body,
 			})
 			if err != nil {
 				return ErrorMsg{Err: fmt.Errorf("failed to create item: %w", err)}
 			}
+			
+			// If assignees specified, update the draft issue with them
+			if len(assigneeIDs) > 0 {
+				_, err = client.UpdateDraftIssue(item.ID, msg.Title, msg.Body, assigneeIDs)
+				if err != nil {
+					return ErrorMsg{Err: fmt.Errorf("item created but failed to assign user: %w", err)}
+				}
+			}
 		} else {
-			_, err := client.UpdateDraftIssue(msg.Item.ID, msg.Title, msg.Body)
+			_, err := client.UpdateDraftIssue(msg.Item.ID, msg.Title, msg.Body, assigneeIDs)
 			if err != nil {
 				return ErrorMsg{Err: fmt.Errorf("failed to update item: %w", err)}
 			}
@@ -536,4 +555,29 @@ type ProjectCreatedMsg struct{}
 
 type ErrorMsg struct {
 	Err error
+}
+
+func searchUsersCmd(query string, owner string, isOrgProject bool) tea.Cmd {
+	return func() tea.Msg {
+		client, err := api.NewClient()
+		if err != nil {
+			return ErrorMsg{Err: fmt.Errorf("failed to create API client: %w", err)}
+		}
+		
+		var users []string
+		if isOrgProject {
+			// For org projects, search only org members
+			users, err = client.SearchOrgMembers(owner, query, 5)
+		} else {
+			// For personal projects, search all users
+			users, err = client.SearchUsers(query, 5)
+		}
+		
+		if err != nil {
+			// Silently fail for user search - don't interrupt typing
+			return UserSuggestionsMsg{Users: []string{}}
+		}
+		
+		return UserSuggestionsMsg{Users: users}
+	}
 }
