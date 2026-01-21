@@ -1,0 +1,515 @@
+package api
+
+import (
+	"encoding/json"
+	"fmt"
+	"time"
+
+	"github.com/cli/go-gh/v2/pkg/api"
+	"github.com/thomaskoefod/githubProjectTUI/internal/models"
+)
+
+// Client wraps the GitHub API client for Projects V2
+type Client struct {
+	client *api.GraphQLClient
+}
+
+// NewClient creates a new API client
+func NewClient() (*Client, error) {
+	opts := api.ClientOptions{}
+	client, err := api.NewGraphQLClient(opts)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create API client: %w", err)
+	}
+
+	return &Client{
+		client: client,
+	}, nil
+}
+
+// GetViewer returns information about the authenticated user
+func (c *Client) GetViewer() (string, error) {
+	query := `query {
+		viewer {
+			login
+		}
+	}`
+
+	var response struct {
+		Viewer struct {
+			Login string `json:"login"`
+		} `json:"viewer"`
+	}
+
+	err := c.client.Do(query, nil, &response)
+	if err != nil {
+		return "", fmt.Errorf("failed to get viewer: %w", err)
+	}
+
+	return response.Viewer.Login, nil
+}
+
+// ListUserProjects retrieves all projects for the authenticated user
+func (c *Client) ListUserProjects(login string, first int) ([]models.Project, error) {
+	query := `query($login: String!, $first: Int!) {
+		user(login: $login) {
+			projectsV2(first: $first) {
+				nodes {
+					id
+					number
+					title
+					shortDescription
+					public
+					closed
+					url
+					createdAt
+					updatedAt
+					items {
+						totalCount
+					}
+				}
+			}
+		}
+	}`
+
+	variables := map[string]interface{}{
+		"login": login,
+		"first": first,
+	}
+
+	var response struct {
+		User struct {
+			ProjectsV2 struct {
+				Nodes []struct {
+					ID               string    `json:"id"`
+					Number           int       `json:"number"`
+					Title            string    `json:"title"`
+					ShortDescription string    `json:"shortDescription"`
+					Public           bool      `json:"public"`
+					Closed           bool      `json:"closed"`
+					URL              string    `json:"url"`
+					CreatedAt        time.Time `json:"createdAt"`
+					UpdatedAt        time.Time `json:"updatedAt"`
+					Items            struct {
+						TotalCount int `json:"totalCount"`
+					} `json:"items"`
+				} `json:"nodes"`
+			} `json:"projectsV2"`
+		} `json:"user"`
+	}
+
+	err := c.client.Do(query, variables, &response)
+	if err != nil {
+		return nil, fmt.Errorf("failed to list user projects: %w", err)
+	}
+
+	projects := make([]models.Project, len(response.User.ProjectsV2.Nodes))
+	for i, node := range response.User.ProjectsV2.Nodes {
+		projects[i] = models.Project{
+			ID:               node.ID,
+			Number:           node.Number,
+			Title:            node.Title,
+			ShortDescription: node.ShortDescription,
+			Public:           node.Public,
+			Closed:           node.Closed,
+			URL:              node.URL,
+			CreatedAt:        node.CreatedAt,
+			UpdatedAt:        node.UpdatedAt,
+			ItemCount:        node.Items.TotalCount,
+			Owner: models.ProjectOwner{
+				Login: login,
+				Type:  "User",
+			},
+		}
+	}
+
+	return projects, nil
+}
+
+// ListOrgProjects retrieves all projects for an organization
+func (c *Client) ListOrgProjects(org string, first int) ([]models.Project, error) {
+	query := `query($org: String!, $first: Int!) {
+		organization(login: $org) {
+			projectsV2(first: $first) {
+				nodes {
+					id
+					number
+					title
+					shortDescription
+					public
+					closed
+					url
+					createdAt
+					updatedAt
+					items {
+						totalCount
+					}
+				}
+			}
+		}
+	}`
+
+	variables := map[string]interface{}{
+		"org":   org,
+		"first": first,
+	}
+
+	var response struct {
+		
+			Organization struct {
+				ProjectsV2 struct {
+					Nodes []struct {
+						ID               string    `json:"id"`
+						Number           int       `json:"number"`
+						Title            string    `json:"title"`
+						ShortDescription string    `json:"shortDescription"`
+						Public           bool      `json:"public"`
+						Closed           bool      `json:"closed"`
+						URL              string    `json:"url"`
+						CreatedAt        time.Time `json:"createdAt"`
+						UpdatedAt        time.Time `json:"updatedAt"`
+						Items            struct {
+							TotalCount int `json:"totalCount"`
+						} `json:"items"`
+					} `json:"nodes"`
+				} `json:"projectsV2"`
+			} `json:"organization"`
+		
+	}
+
+	err := c.client.Do(query, variables, &response)
+	if err != nil {
+		return nil, fmt.Errorf("failed to list org projects: %w", err)
+	}
+
+	projects := make([]models.Project, len(response.Data.Organization.ProjectsV2.Nodes))
+	for i, node := range response.Data.Organization.ProjectsV2.Nodes {
+		projects[i] = models.Project{
+			ID:               node.ID,
+			Number:           node.Number,
+			Title:            node.Title,
+			ShortDescription: node.ShortDescription,
+			Public:           node.Public,
+			Closed:           node.Closed,
+			URL:              node.URL,
+			CreatedAt:        node.CreatedAt,
+			UpdatedAt:        node.UpdatedAt,
+			ItemCount:        node.Items.TotalCount,
+			Owner: models.ProjectOwner{
+				Login: org,
+				Type:  "Organization",
+			},
+		}
+	}
+
+	return projects, nil
+}
+
+// ListAllProjects retrieves projects from both user and all their organizations
+func (c *Client) ListAllProjects(username string) ([]models.Project, error) {
+	var allProjects []models.Project
+
+	// Get user projects
+	userProjects, err := c.ListUserProjects(username, 50)
+	if err == nil {
+		allProjects = append(allProjects, userProjects...)
+	}
+
+	// Get user's organizations
+	orgs, err := c.GetUserOrganizations(username)
+	if err != nil {
+		// If we can't get orgs, just return user projects
+		return allProjects, nil
+	}
+
+	// Get projects from each organization
+	for _, org := range orgs {
+		orgProjects, err := c.ListOrgProjects(org, 50)
+		if err == nil {
+			allProjects = append(allProjects, orgProjects...)
+		}
+	}
+
+	return allProjects, nil
+}
+
+// GetUserOrganizations retrieves the user's organizations
+func (c *Client) GetUserOrganizations(username string) ([]string, error) {
+	query := `query($login: String!) {
+		user(login: $login) {
+			organizations(first: 100) {
+				nodes {
+					login
+				}
+			}
+		}
+	}`
+
+	variables := map[string]interface{}{
+		"login": username,
+	}
+
+	var response struct {
+		
+			User struct {
+				Organizations struct {
+					Nodes []struct {
+						Login string `json:"login"`
+					} `json:"nodes"`
+				} `json:"organizations"`
+			} `json:"user"`
+		
+	}
+
+	err := c.client.Do(query, variables, &response)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get organizations: %w", err)
+	}
+
+	orgs := make([]string, len(response.Data.User.Organizations.Nodes))
+	for i, node := range response.Data.User.Organizations.Nodes {
+		orgs[i] = node.Login
+	}
+
+	return orgs, nil
+}
+
+// GetProject retrieves details for a specific project
+func (c *Client) GetProject(nodeID string) (*models.Project, error) {
+	query := `query($id: ID!) {
+		node(id: $id) {
+			... on ProjectV2 {
+				id
+				number
+				title
+				shortDescription
+				public
+				closed
+				url
+				createdAt
+				updatedAt
+				items {
+					totalCount
+				}
+				owner {
+					... on User {
+						login
+					}
+					... on Organization {
+						login
+					}
+				}
+			}
+		}
+	}`
+
+	variables := map[string]interface{}{
+		"id": nodeID,
+	}
+
+	var response struct {
+		
+			Node struct {
+				ID               string    `json:"id"`
+				Number           int       `json:"number"`
+				Title            string    `json:"title"`
+				ShortDescription string    `json:"shortDescription"`
+				Public           bool      `json:"public"`
+				Closed           bool      `json:"closed"`
+				URL              string    `json:"url"`
+				CreatedAt        time.Time `json:"createdAt"`
+				UpdatedAt        time.Time `json:"updatedAt"`
+				Items            struct {
+					TotalCount int `json:"totalCount"`
+				} `json:"items"`
+				Owner struct {
+					Login string `json:"login"`
+				} `json:"owner"`
+			} `json:"node"`
+		
+	}
+
+	err := c.client.Do(query, variables, &response)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get project: %w", err)
+	}
+
+	project := &models.Project{
+		ID:               response.Data.Node.ID,
+		Number:           response.Data.Node.Number,
+		Title:            response.Data.Node.Title,
+		ShortDescription: response.Data.Node.ShortDescription,
+		Public:           response.Data.Node.Public,
+		Closed:           response.Data.Node.Closed,
+		URL:              response.Data.Node.URL,
+		CreatedAt:        response.Data.Node.CreatedAt,
+		UpdatedAt:        response.Data.Node.UpdatedAt,
+		ItemCount:        response.Data.Node.Items.TotalCount,
+		Owner: models.ProjectOwner{
+			Login: response.Data.Node.Owner.Login,
+			Type:  "User",
+		},
+	}
+
+	return project, nil
+}
+
+// CreateProject creates a new project
+func (c *Client) CreateProject(input models.CreateProjectInput) (*models.Project, error) {
+	mutation := `mutation($input: CreateProjectV2Input!) {
+		createProjectV2(input: $input) {
+			projectV2 {
+				id
+				number
+				title
+				shortDescription
+				public
+				url
+				createdAt
+			}
+		}
+	}`
+
+	mutationInput := map[string]interface{}{
+		"ownerId": input.OwnerID,
+		"title":   input.Title,
+	}
+
+	if input.ShortDescription != "" {
+		mutationInput["shortDescription"] = input.ShortDescription
+	}
+
+	variables := map[string]interface{}{
+		"input": mutationInput,
+	}
+
+	var response struct {
+		
+			CreateProjectV2 struct {
+				ProjectV2 struct {
+					ID               string    `json:"id"`
+					Number           int       `json:"number"`
+					Title            string    `json:"title"`
+					ShortDescription string    `json:"shortDescription"`
+					Public           bool      `json:"public"`
+					URL              string    `json:"url"`
+					CreatedAt        time.Time `json:"createdAt"`
+				} `json:"projectV2"`
+			} `json:"createProjectV2"`
+		
+	}
+
+	err := c.client.Do(mutation, variables, &response)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create project: %w", err)
+	}
+
+	project := &models.Project{
+		ID:               response.Data.CreateProjectV2.ProjectV2.ID,
+		Number:           response.Data.CreateProjectV2.ProjectV2.Number,
+		Title:            response.Data.CreateProjectV2.ProjectV2.Title,
+		ShortDescription: response.Data.CreateProjectV2.ProjectV2.ShortDescription,
+		Public:           response.Data.CreateProjectV2.ProjectV2.Public,
+		URL:              response.Data.CreateProjectV2.ProjectV2.URL,
+		CreatedAt:        response.Data.CreateProjectV2.ProjectV2.CreatedAt,
+	}
+
+	return project, nil
+}
+
+// UpdateProject updates an existing project
+func (c *Client) UpdateProject(input models.UpdateProjectInput) (*models.Project, error) {
+	mutation := `mutation($input: UpdateProjectV2Input!) {
+		updateProjectV2(input: $input) {
+			projectV2 {
+				id
+				title
+				shortDescription
+				public
+				closed
+			}
+		}
+	}`
+
+	mutationInput := map[string]interface{}{
+		"projectId": input.ProjectID,
+	}
+
+	if input.Title != nil {
+		mutationInput["title"] = *input.Title
+	}
+	if input.ShortDescription != nil {
+		mutationInput["shortDescription"] = *input.ShortDescription
+	}
+	if input.Public != nil {
+		mutationInput["public"] = *input.Public
+	}
+	if input.Closed != nil {
+		mutationInput["closed"] = *input.Closed
+	}
+
+	variables := map[string]interface{}{
+		"input": mutationInput,
+	}
+
+	var response struct {
+		
+			UpdateProjectV2 struct {
+				ProjectV2 struct {
+					ID               string `json:"id"`
+					Title            string `json:"title"`
+					ShortDescription string `json:"shortDescription"`
+					Public           bool   `json:"public"`
+					Closed           bool   `json:"closed"`
+				} `json:"projectV2"`
+			} `json:"updateProjectV2"`
+		
+	}
+
+	err := c.client.Do(mutation, variables, &response)
+	if err != nil {
+		return nil, fmt.Errorf("failed to update project: %w", err)
+	}
+
+	project := &models.Project{
+		ID:               response.Data.UpdateProjectV2.ProjectV2.ID,
+		Title:            response.Data.UpdateProjectV2.ProjectV2.Title,
+		ShortDescription: response.Data.UpdateProjectV2.ProjectV2.ShortDescription,
+		Public:           response.Data.UpdateProjectV2.ProjectV2.Public,
+		Closed:           response.Data.UpdateProjectV2.ProjectV2.Closed,
+	}
+
+	return project, nil
+}
+
+// DeleteProject deletes a project
+func (c *Client) DeleteProject(projectID string) error {
+	mutation := `mutation($input: DeleteProjectV2Input!) {
+		deleteProjectV2(input: $input) {
+			projectV2 {
+				id
+			}
+		}
+	}`
+
+	variables := map[string]interface{}{
+		"input": map[string]interface{}{
+			"projectId": projectID,
+		},
+	}
+
+	var response map[string]interface{}
+
+	err := c.client.Do(mutation, variables, &response)
+	if err != nil {
+		return fmt.Errorf("failed to delete project: %w", err)
+	}
+
+	return nil
+}
+
+// Helper function to debug responses
+func debugJSON(v interface{}) {
+	b, _ := json.MarshalIndent(v, "", "  ")
+	fmt.Println(string(b))
+}
