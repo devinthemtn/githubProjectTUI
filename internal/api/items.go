@@ -2,6 +2,7 @@ package api
 
 import (
 	"fmt"
+	"os"
 	"time"
 
 	"github.com/thomaskoefod/githubProjectTUI/internal/models"
@@ -19,6 +20,7 @@ func (c *Client) ListProjectItems(projectID string, first int) ([]models.Project
 						content {
 							__typename
 							... on Issue {
+								id
 								title
 								body
 								number
@@ -42,6 +44,7 @@ func (c *Client) ListProjectItems(projectID string, first int) ([]models.Project
 								}
 							}
 							... on PullRequest {
+								id
 								title
 								body
 								number
@@ -65,6 +68,7 @@ func (c *Client) ListProjectItems(projectID string, first int) ([]models.Project
 								}
 							}
 							... on DraftIssue {
+								id
 								title
 								body
 								createdAt
@@ -95,6 +99,7 @@ func (c *Client) ListProjectItems(projectID string, first int) ([]models.Project
 					Type    string `json:"type"`
 					Content struct {
 						TypeName  string    `json:"__typename"`
+						ID        string    `json:"id"`
 						Title     string    `json:"title"`
 						Body      string    `json:"body"`
 						Number    int       `json:"number,omitempty"`
@@ -145,6 +150,7 @@ func (c *Client) ListProjectItems(projectID string, first int) ([]models.Project
 
 		item := models.ProjectItem{
 			ID:        node.ID,
+			ContentID: node.Content.ID,
 			Type:      node.Content.TypeName,
 			Title:     node.Content.Title,
 			Body:      node.Content.Body,
@@ -203,12 +209,17 @@ func (c *Client) AddProjectItem(input models.CreateItemInput) (*models.ProjectIt
 // CreateDraftIssue creates a draft issue in a project
 // Note: assignees cannot be set during creation, use UpdateDraftIssue afterward
 func (c *Client) CreateDraftIssue(input models.CreateItemInput) (*models.ProjectItem, error) {
+	fmt.Fprintf(os.Stderr, "\n>>> CreateDraftIssue called\n")
+	fmt.Fprintf(os.Stderr, "ProjectID: %s\n", input.ProjectID)
+	fmt.Fprintf(os.Stderr, "Title: %s\n", input.Title)
+	
 	mutation := `mutation($input: AddProjectV2DraftIssueInput!) {
 		addProjectV2DraftIssue(input: $input) {
 			projectItem {
 				id
 				content {
 					... on DraftIssue {
+						id
 						title
 						body
 						createdAt
@@ -233,6 +244,7 @@ func (c *Client) CreateDraftIssue(input models.CreateItemInput) (*models.Project
 			ProjectItem struct {
 				ID      string `json:"id"`
 				Content struct {
+					ID        string    `json:"id"`
 					Title     string    `json:"title"`
 					Body      string    `json:"body"`
 					CreatedAt time.Time `json:"createdAt"`
@@ -243,11 +255,13 @@ func (c *Client) CreateDraftIssue(input models.CreateItemInput) (*models.Project
 
 	err := c.client.Do(mutation, variables, &response)
 	if err != nil {
+		fmt.Fprintf(os.Stderr, "CreateDraftIssue GraphQL error: %v\n", err)
 		return nil, fmt.Errorf("failed to create draft issue: %w", err)
 	}
 
 	item := &models.ProjectItem{
 		ID:        response.AddProjectV2DraftIssue.ProjectItem.ID,
+		ContentID: response.AddProjectV2DraftIssue.ProjectItem.Content.ID,
 		Type:      "DraftIssue",
 		Title:     response.AddProjectV2DraftIssue.ProjectItem.Content.Title,
 		Body:      response.AddProjectV2DraftIssue.ProjectItem.Content.Body,
@@ -255,11 +269,18 @@ func (c *Client) CreateDraftIssue(input models.CreateItemInput) (*models.Project
 		Assignees: []string{}, // Will be empty on creation
 	}
 
+	fmt.Fprintf(os.Stderr, "CreateDraftIssue success - ProjectItem.ID: %s, Content.ID: %s\n", item.ID, item.ContentID)
 	return item, nil
 }
 
 // UpdateDraftIssue updates a draft issue
 func (c *Client) UpdateDraftIssue(itemID, title, body string, assigneeIDs []string) (*models.ProjectItem, error) {
+	fmt.Fprintf(os.Stderr, "\n>>> UpdateDraftIssue called\n")
+	fmt.Fprintf(os.Stderr, "DraftIssueID: %s\n", itemID)
+	fmt.Fprintf(os.Stderr, "Title: %s\n", title)
+	fmt.Fprintf(os.Stderr, "Body length: %d\n", len(body))
+	fmt.Fprintf(os.Stderr, "AssigneeIDs: %v\n", assigneeIDs)
+	
 	mutation := `mutation($input: UpdateProjectV2DraftIssueInput!) {
 		updateProjectV2DraftIssue(input: $input) {
 			draftIssue {
@@ -289,6 +310,8 @@ func (c *Client) UpdateDraftIssue(itemID, title, body string, assigneeIDs []stri
 	if len(assigneeIDs) > 0 {
 		mutationInput["assigneeIds"] = assigneeIDs
 	}
+	
+	fmt.Fprintf(os.Stderr, "Mutation input: %+v\n", mutationInput)
 
 	variables := map[string]interface{}{
 		"input": mutationInput,
@@ -312,6 +335,7 @@ func (c *Client) UpdateDraftIssue(itemID, title, body string, assigneeIDs []stri
 
 	err := c.client.Do(mutation, variables, &response)
 	if err != nil {
+		fmt.Fprintf(os.Stderr, "UpdateDraftIssue GraphQL error: %v\n", err)
 		return nil, fmt.Errorf("failed to update draft issue: %w", err)
 	}
 
@@ -329,6 +353,7 @@ func (c *Client) UpdateDraftIssue(itemID, title, body string, assigneeIDs []stri
 		Assignees: assignees,
 	}
 
+	fmt.Fprintf(os.Stderr, "UpdateDraftIssue success - ID: %s, Assignees: %v\n", item.ID, item.Assignees)
 	return item, nil
 }
 
@@ -355,4 +380,63 @@ func (c *Client) DeleteProjectItem(projectID, itemID string) error {
 	}
 
 	return nil
+}
+
+// ConvertDraftIssueToIssue converts a draft issue to a real GitHub issue
+func (c *Client) ConvertDraftIssueToIssue(projectItemID, repositoryID string) (*models.ProjectItem, error) {
+	fmt.Fprintf(os.Stderr, "\n>>> ConvertDraftIssueToIssue called\n")
+	fmt.Fprintf(os.Stderr, "ProjectItemID: %s\n", projectItemID)
+	fmt.Fprintf(os.Stderr, "RepositoryID: %s\n", repositoryID)
+	
+	mutation := `mutation($input: ConvertProjectV2DraftIssueItemToIssueInput!) {
+		convertProjectV2DraftIssueItemToIssue(input: $input) {
+			projectV2Item {
+				id
+			}
+			issue {
+				id
+				number
+				title
+				url
+			}
+		}
+	}`
+
+	variables := map[string]interface{}{
+		"input": map[string]interface{}{
+			"projectV2ItemId": projectItemID,
+			"repositoryId":    repositoryID,
+		},
+	}
+
+	var response struct {
+		ConvertProjectV2DraftIssueItemToIssue struct {
+			ProjectV2Item struct {
+				ID string `json:"id"`
+			} `json:"projectV2Item"`
+			Issue struct {
+				ID     string `json:"id"`
+				Number int    `json:"number"`
+				Title  string `json:"title"`
+				URL    string `json:"url"`
+			} `json:"issue"`
+		} `json:"convertProjectV2DraftIssueItemToIssue"`
+	}
+
+	err := c.client.Do(mutation, variables, &response)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "ConvertDraftIssueToIssue GraphQL error: %v\n", err)
+		return nil, fmt.Errorf("failed to convert draft issue: %w", err)
+	}
+
+	item := &models.ProjectItem{
+		ID:     response.ConvertProjectV2DraftIssueItemToIssue.ProjectV2Item.ID,
+		Type:   "Issue",
+		Title:  response.ConvertProjectV2DraftIssueItemToIssue.Issue.Title,
+		Number: response.ConvertProjectV2DraftIssueItemToIssue.Issue.Number,
+		URL:    response.ConvertProjectV2DraftIssueItemToIssue.Issue.URL,
+	}
+
+	fmt.Fprintf(os.Stderr, "ConvertDraftIssueToIssue success - Issue #%d: %s\n", item.Number, item.URL)
+	return item, nil
 }

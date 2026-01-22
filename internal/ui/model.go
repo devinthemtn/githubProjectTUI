@@ -2,6 +2,7 @@ package ui
 
 import (
 	"fmt"
+	"os"
 	"os/exec"
 	"runtime"
 
@@ -22,28 +23,30 @@ const (
 	viewItemDetail
 	viewItemEditor
 	viewProjectCreator
+	viewRepositorySelector
 	viewHelp
 )
 
 type Model struct {
-	currentView     view
-	apiClient       *api.Client
-	username        string
-	orgs            []string
-	currentOwner    string
-	currentIsUser   bool
-	ownerSelector   OwnerSelectorModel
-	projectList     ProjectListModel
-	projectDetail   ProjectDetailModel
-	itemDetail      ItemDetailModel
-	itemEditor      ItemEditorModel
-	projectCreator  ProjectCreatorModel
-	width           int
-	height          int
-	err             error
-	loading         bool
-	message         string
-	debugMode       bool
+	currentView        view
+	apiClient          *api.Client
+	username           string
+	orgs               []string
+	currentOwner       string
+	currentIsUser      bool
+	ownerSelector      OwnerSelectorModel
+	projectList        ProjectListModel
+	projectDetail      ProjectDetailModel
+	itemDetail         ItemDetailModel
+	itemEditor         ItemEditorModel
+	projectCreator     ProjectCreatorModel
+	repositorySelector RepositorySelectorModel
+	width              int
+	height             int
+	err                error
+	loading            bool
+	message            string
+	debugMode          bool
 }
 
 func NewModel() Model {
@@ -79,6 +82,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.itemEditor, _ = m.itemEditor.Update(msg)
 		case viewProjectCreator:
 			m.projectCreator, _ = m.projectCreator.Update(msg)
+		case viewRepositorySelector:
+			m.repositorySelector, _ = m.repositorySelector.Update(msg)
 		}
 
 		return m, nil
@@ -186,6 +191,41 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Reload project items
 		return m, loadProjectItems(m.apiClient, m.itemEditor.project)
 
+	case DeleteItemMsg:
+		m.loading = true
+		m.message = "Deleting item..."
+		return m, deleteItem(m.apiClient, msg)
+
+	case ItemDeletedMsg:
+		m.loading = false
+		m.message = ""
+		// Reload project items to reflect deletion
+		return m, loadProjectItems(m.apiClient, msg.Project)
+
+	case LoadRepositoriesMsg:
+		m.loading = true
+		m.message = "Loading repositories..."
+		return m, loadRepositories(m.apiClient, m.currentOwner, m.currentIsUser, msg.Project, msg.Item)
+
+	case RepositoriesLoadedMsg:
+		m.repositorySelector = NewRepositorySelectorModel(msg.Repositories, msg.Project, msg.Item)
+		m.repositorySelector.width = m.width
+		m.repositorySelector.height = m.height
+		m.currentView = viewRepositorySelector
+		m.loading = false
+		return m, nil
+
+	case ConvertDraftMsg:
+		m.loading = true
+		m.message = "Converting draft to issue..."
+		return m, convertDraft(m.apiClient, msg)
+
+	case DraftConvertedMsg:
+		m.loading = false
+		m.message = ""
+		// Reload project items to show the converted issue
+		return m, loadProjectItems(m.apiClient, msg.Project)
+
 	case ErrorMsg:
 		m.err = msg.Err
 		m.loading = false
@@ -228,6 +268,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			case viewProjectCreator:
 				m.currentView = viewProjectList
 				return m, nil
+			case viewRepositorySelector:
+				m.currentView = viewItemDetail
+				return m, nil
 			case viewHelp:
 				m.currentView = viewProjectList
 				return m, nil
@@ -260,6 +303,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.itemEditor, cmd = m.itemEditor.Update(msg)
 	case viewProjectCreator:
 		m.projectCreator, cmd = m.projectCreator.Update(msg)
+	case viewRepositorySelector:
+		m.repositorySelector, cmd = m.repositorySelector.Update(msg)
 	}
 
 	return m, cmd
@@ -287,6 +332,8 @@ func (m Model) View() string {
 		return m.itemEditor.View()
 	case viewProjectCreator:
 		return m.projectCreator.View()
+	case viewRepositorySelector:
+		return m.repositorySelector.View()
 	case viewHelp:
 		return m.renderHelp()
 	default:
@@ -438,40 +485,68 @@ func loadProjectItems(client *api.Client, project models.Project) tea.Cmd {
 
 func saveItem(client *api.Client, msg SaveItemMsg) tea.Cmd {
 	return func() tea.Msg {
+		// DEBUG: Log save attempt
+		fmt.Fprintf(os.Stderr, "\n=== SAVE ITEM DEBUG ===\n")
+		fmt.Fprintf(os.Stderr, "IsNewItem: %v\n", msg.IsNewItem)
+		fmt.Fprintf(os.Stderr, "Title: %s\n", msg.Title)
+		fmt.Fprintf(os.Stderr, "Assignee: %s\n", msg.Assignee)
+		
 		// Get assignee node ID if username provided
 		var assigneeIDs []string
 		if msg.Assignee != "" {
 			nodeID, err := client.GetUserNodeID(msg.Assignee)
 			if err != nil {
+				fmt.Fprintf(os.Stderr, "ERROR: Failed to get user node ID: %v\n", err)
 				return ErrorMsg{Err: fmt.Errorf("failed to get user ID for %s: %w", msg.Assignee, err)}
 			}
 			assigneeIDs = []string{nodeID}
+			fmt.Fprintf(os.Stderr, "Assignee node ID: %s\n", nodeID)
 		}
 
 		if msg.IsNewItem {
 			// Create draft issue (without assignees initially)
+			fmt.Fprintf(os.Stderr, "Creating draft issue in project: %s\n", msg.Project.ID)
 			item, err := client.CreateDraftIssue(models.CreateItemInput{
 				ProjectID:   msg.Project.ID,
 				Title:       msg.Title,
 				Body:        msg.Body,
 			})
 			if err != nil {
+				fmt.Fprintf(os.Stderr, "ERROR: CreateDraftIssue failed: %v\n", err)
 				return ErrorMsg{Err: fmt.Errorf("failed to create item: %w", err)}
 			}
 			
+			fmt.Fprintf(os.Stderr, "Created item - ID: %s, ContentID: %s\n", item.ID, item.ContentID)
+			
 			// If assignees specified, update the draft issue with them
+			// Use ContentID (draft issue ID), not project item ID
 			if len(assigneeIDs) > 0 {
-				_, err = client.UpdateDraftIssue(item.ID, msg.Title, msg.Body, assigneeIDs)
+				fmt.Fprintf(os.Stderr, "Updating draft with assignees - ContentID: %s\n", item.ContentID)
+				_, err = client.UpdateDraftIssue(item.ContentID, msg.Title, msg.Body, assigneeIDs)
 				if err != nil {
+					fmt.Fprintf(os.Stderr, "ERROR: UpdateDraftIssue failed: %v\n", err)
 					return ErrorMsg{Err: fmt.Errorf("item created but failed to assign user: %w", err)}
 				}
+				fmt.Fprintf(os.Stderr, "Successfully assigned user\n")
 			}
 		} else {
-			_, err := client.UpdateDraftIssue(msg.Item.ID, msg.Title, msg.Body, assigneeIDs)
+			// For updates, use ContentID (the actual draft issue/issue ID)
+			fmt.Fprintf(os.Stderr, "Editing existing item - ID: %s, ContentID: %s\n", msg.Item.ID, msg.Item.ContentID)
+			contentID := msg.Item.ContentID
+			if contentID == "" {
+				fmt.Fprintf(os.Stderr, "ERROR: ContentID is empty! Falling back to ID: %s\n", msg.Item.ID)
+				// Fallback for items that might not have ContentID populated
+				contentID = msg.Item.ID
+			}
+			fmt.Fprintf(os.Stderr, "Updating draft issue with ContentID: %s\n", contentID)
+			_, err := client.UpdateDraftIssue(contentID, msg.Title, msg.Body, assigneeIDs)
 			if err != nil {
+				fmt.Fprintf(os.Stderr, "ERROR: UpdateDraftIssue failed: %v\n", err)
 				return ErrorMsg{Err: fmt.Errorf("failed to update item: %w", err)}
 			}
+			fmt.Fprintf(os.Stderr, "Successfully updated item\n")
 		}
+		fmt.Fprintf(os.Stderr, "=== SAVE COMPLETE ===\n\n")
 		return ItemSavedMsg{}
 	}
 }
@@ -532,6 +607,45 @@ func createProject(client *api.Client, msg CreateProjectMsg) tea.Cmd {
 	}
 }
 
+func deleteItem(client *api.Client, msg DeleteItemMsg) tea.Cmd {
+	return func() tea.Msg {
+		err := client.DeleteProjectItem(msg.Project.ID, msg.Item.ID)
+		if err != nil {
+			return ErrorMsg{Err: fmt.Errorf("failed to delete item: %w", err)}
+		}
+		return ItemDeletedMsg{Project: msg.Project}
+	}
+}
+
+func loadRepositories(client *api.Client, owner string, isUser bool, project models.Project, item models.ProjectItem) tea.Cmd {
+	return func() tea.Msg {
+		repos, err := client.ListRepositories(owner, isUser)
+		if err != nil {
+			return ErrorMsg{Err: fmt.Errorf("failed to load repositories: %w", err)}
+		}
+		return RepositoriesLoadedMsg{
+			Repositories: repos,
+			Project:      project,
+			Item:         item,
+		}
+	}
+}
+
+func convertDraft(client *api.Client, msg ConvertDraftMsg) tea.Cmd {
+	return func() tea.Msg {
+		// Get the repository node ID
+		repoID := msg.Repository.ID
+		
+		// Convert the draft issue to a real issue
+		_, err := client.ConvertDraftIssueToIssue(msg.Item.ID, repoID)
+		if err != nil {
+			return ErrorMsg{Err: fmt.Errorf("failed to convert draft to issue: %w", err)}
+		}
+		
+		return DraftConvertedMsg{Project: msg.Project}
+	}
+}
+
 // Messages
 
 type InitializedMsg struct {
@@ -550,6 +664,10 @@ type ProjectItemsLoadedMsg struct {
 }
 
 type ItemSavedMsg struct{}
+
+type ItemDeletedMsg struct {
+	Project models.Project
+}
 
 type ProjectCreatedMsg struct{}
 

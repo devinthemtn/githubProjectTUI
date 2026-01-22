@@ -76,6 +76,11 @@ func (m ItemDetailModel) Update(msg tea.Msg) (ItemDetailModel, tea.Cmd) {
 		case "e":
 			// Edit item
 			return m, EditItemCmd(m.item)
+		case "c":
+			// Convert draft to issue (only for draft issues)
+			if m.item.Type == "DraftIssue" {
+				return m, LoadRepositoriesCmd(m.project, m.item)
+			}
 		case "d":
 			// Delete item
 			return m, DeleteItemCmd(m.project, m.item)
@@ -225,7 +230,11 @@ func (m ItemDetailModel) View() string {
 
 	// Help
 	b.WriteString("\n")
-	helpText := "e: edit • d: delete"
+	helpText := "e: edit"
+	if m.item.Type == "DraftIssue" {
+		helpText += " • c: convert to issue"
+	}
+	helpText += " • d: delete"
 	if m.item.URL != "" {
 		helpText += " • o: open in browser"
 	}
@@ -308,7 +317,23 @@ func OpenURLCmd(url string) tea.Cmd {
 	}
 }
 
+// LoadRepositoriesCmd signals loading repositories for draft conversion
+func LoadRepositoriesCmd(project models.Project, item models.ProjectItem) tea.Cmd {
+	return func() tea.Msg {
+		return LoadRepositoriesMsg{
+			Project: project,
+			Item:    item,
+		}
+	}
+}
+
 // OpenURLMsg is sent to open a URL
 type OpenURLMsg struct {
 	URL string
+}
+
+// LoadRepositoriesMsg is sent to load repositories for selection
+type LoadRepositoriesMsg struct {
+	Project models.Project
+	Item    models.ProjectItem
 }

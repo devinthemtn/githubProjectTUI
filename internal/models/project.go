@@ -25,12 +25,13 @@ type ProjectOwner struct {
 
 // ProjectItem represents an item in a project
 type ProjectItem struct {
-	ID        string
-	Type      string // "ISSUE", "PULL_REQUEST", "DRAFT_ISSUE"
+	ID        string   // Project item ID
+	ContentID string   // Content ID (for draft issues, this is the draft issue ID)
+	Type      string   // "ISSUE", "PULL_REQUEST", "DRAFT_ISSUE"
 	Title     string
 	Body      string
-	Number    int    // For issues/PRs
-	State     string // For issues/PRs
+	Number    int      // For issues/PRs
+	State     string   // For issues/PRs
 	URL       string
 	CreatedAt time.Time
 	UpdatedAt time.Time
@@ -44,6 +45,15 @@ type Comment struct {
 	Author    string
 	Body      string
 	CreatedAt time.Time
+}
+
+// Repository represents a GitHub repository
+type Repository struct {
+	ID          string
+	Name        string
+	Owner       string
+	Description string
+	IsPrivate   bool
 }
 
 // ProjectField represents a custom field in a project
