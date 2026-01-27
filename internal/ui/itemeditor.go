@@ -12,20 +12,21 @@ import (
 
 // ItemEditorModel represents the item editor view
 type ItemEditorModel struct {
-	project           models.Project
-	owner             string // Owner login (user or org)
-	isOrgProject      bool   // True if project belongs to org
-	item              *models.ProjectItem
-	titleInput        textinput.Model
-	bodyInput         textarea.Model
-	assigneeInput     textinput.Model
-	focusIndex        int
-	isNewItem         bool
-	width             int
-	height            int
-	suggestions       []string
+	project            models.Project
+	owner              string // Owner login (user or org)
+	isOrgProject       bool   // True if project belongs to org
+	item               *models.ProjectItem
+	titleInput         textinput.Model
+	bodyInput          textarea.Model
+	assigneeInput      textinput.Model
+	convertToIssue     bool   // Toggle: true = convert to issue on save
+	focusIndex         int
+	isNewItem          bool
+	width              int
+	height             int
+	suggestions        []string
 	selectedSuggestion int
-	showSuggestions   bool
+	showSuggestions    bool
 }
 
 func NewItemEditorModel(project models.Project, owner string, isOrgProject bool, item *models.ProjectItem) ItemEditorModel {
@@ -56,15 +57,16 @@ func NewItemEditorModel(project models.Project, owner string, isOrgProject bool,
 	}
 
 	return ItemEditorModel{
-		project:       project,
-		owner:         owner,
-		isOrgProject:  isOrgProject,
-		item:          item,
-		titleInput:    ti,
-		bodyInput:     ta,
-		assigneeInput: ai,
-		focusIndex:    0,
-		isNewItem:     isNew,
+		project:        project,
+		owner:          owner,
+		isOrgProject:   isOrgProject,
+		item:           item,
+		titleInput:     ti,
+		bodyInput:      ta,
+		assigneeInput:  ai,
+		convertToIssue: isNew, // Default to true for new items (create real issue)
+		focusIndex:     0,
+		isNewItem:      isNew,
 	}
 }
 
@@ -130,8 +132,18 @@ func (m ItemEditorModel) Update(msg tea.Msg) (ItemEditorModel, tea.Cmd) {
 
 		switch msg.String() {
 		case "ctrl+s":
-			// Save
+			// Save (might trigger repo selection if converting)
+			if m.convertToIssue && (m.isNewItem || (m.item != nil && m.item.Type == "DraftIssue")) {
+				// Need to select repository for conversion
+				return m, m.saveAndConvertCmd()
+			}
 			return m, m.saveCmd()
+		case "ctrl+t":
+			// Toggle convert to issue (only for drafts)
+			if (m.isNewItem || (m.item != nil && m.item.Type == "DraftIssue")) {
+				m.convertToIssue = !m.convertToIssue
+			}
+			return m, nil
 		case "tab", "shift+tab":
 			// Switch focus
 			if msg.String() == "tab" {
@@ -238,6 +250,22 @@ func (m ItemEditorModel) View() string {
 	b.WriteString("  " + m.assigneeInput.View())
 	b.WriteString("\n")
 
+	// Show type toggle for drafts
+	if m.isNewItem || (m.item != nil && m.item.Type == "DraftIssue") {
+		b.WriteString("\n")
+		typeLabel := "Type: "
+		if m.convertToIssue {
+			typeLabel += "Issue (will create real GitHub issue)"
+		} else {
+			typeLabel += "Draft (will stay as draft item)"
+		}
+		typeStyle := lipgloss.NewStyle().
+			Foreground(lipgloss.Color("#00D7FF")).
+			MarginLeft(2)
+		b.WriteString(typeStyle.Render(typeLabel))
+		b.WriteString("\n")
+	}
+
 	// Show suggestions dropdown if available
 	if m.showSuggestions && len(m.suggestions) > 0 {
 		suggestionStyle := lipgloss.NewStyle().
@@ -272,7 +300,11 @@ func (m ItemEditorModel) View() string {
 		b.WriteString("\n")
 	}
 
-	helpText := "tab: switch fields • ctrl+s: save • esc: cancel"
+	helpText := "tab: switch fields • ctrl+s: save"
+	if m.isNewItem || (m.item != nil && m.item.Type == "DraftIssue") {
+		helpText += " • ctrl+t: toggle type"
+	}
+	helpText += " • esc: cancel"
 	if m.showSuggestions && len(m.suggestions) > 0 {
 		helpText = "↑/↓: navigate suggestions • enter: select • esc: close • ctrl+s: save"
 	}
@@ -294,8 +326,32 @@ func (m ItemEditorModel) saveCmd() tea.Cmd {
 	}
 }
 
+func (m ItemEditorModel) saveAndConvertCmd() tea.Cmd {
+	return func() tea.Msg {
+		// First save the item, then trigger repository selection
+		return SaveAndConvertMsg{
+			Project:   m.project,
+			Item:      m.item,
+			Title:     m.titleInput.Value(),
+			Body:      m.bodyInput.Value(),
+			Assignee:  m.assigneeInput.Value(),
+			IsNewItem: m.isNewItem,
+		}
+	}
+}
+
 // SaveItemMsg is sent when saving an item
 type SaveItemMsg struct {
+	Project   models.Project
+	Item      *models.ProjectItem
+	Title     string
+	Body      string
+	Assignee  string
+	IsNewItem bool
+}
+
+// SaveAndConvertMsg is sent when saving an item and converting to issue
+type SaveAndConvertMsg struct {
 	Project   models.Project
 	Item      *models.ProjectItem
 	Title     string

@@ -5,6 +5,7 @@ import (
 	"os"
 	"time"
 
+	apierrors "github.com/thomaskoefod/githubProjectTUI/internal/errors"
 	"github.com/thomaskoefod/githubProjectTUI/internal/models"
 )
 
@@ -206,74 +207,86 @@ func (c *Client) AddProjectItem(input models.CreateItemInput) (*models.ProjectIt
 	return item, nil
 }
 
-// CreateDraftIssue creates a draft issue in a project
+// CreateDraftIssue creates a draft issue in a project with retry logic
 // Note: assignees cannot be set during creation, use UpdateDraftIssue afterward
 func (c *Client) CreateDraftIssue(input models.CreateItemInput) (*models.ProjectItem, error) {
 	fmt.Fprintf(os.Stderr, "\n>>> CreateDraftIssue called\n")
 	fmt.Fprintf(os.Stderr, "ProjectID: %s\n", input.ProjectID)
 	fmt.Fprintf(os.Stderr, "Title: %s\n", input.Title)
 	
-	mutation := `mutation($input: AddProjectV2DraftIssueInput!) {
-		addProjectV2DraftIssue(input: $input) {
-			projectItem {
-				id
-				content {
-					... on DraftIssue {
-						id
-						title
-						body
-						createdAt
+	var result *models.ProjectItem
+	
+	// Retry wrapper
+	err := apierrors.Retry(func() error {
+		mutation := `mutation($input: AddProjectV2DraftIssueInput!) {
+			addProjectV2DraftIssue(input: $input) {
+				projectItem {
+					id
+					content {
+						... on DraftIssue {
+							id
+							title
+							body
+							createdAt
+						}
 					}
 				}
 			}
+		}`
+
+		mutationInput := map[string]interface{}{
+			"projectId": input.ProjectID,
+			"title":     input.Title,
+			"body":      input.Body,
 		}
-	}`
 
-	mutationInput := map[string]interface{}{
-		"projectId": input.ProjectID,
-		"title":     input.Title,
-		"body":      input.Body,
-	}
+		variables := map[string]interface{}{
+			"input": mutationInput,
+		}
 
-	variables := map[string]interface{}{
-		"input": mutationInput,
-	}
+		var response struct {
+			AddProjectV2DraftIssue struct {
+				ProjectItem struct {
+					ID      string `json:"id"`
+					Content struct {
+						ID        string    `json:"id"`
+						Title     string    `json:"title"`
+						Body      string    `json:"body"`
+						CreatedAt time.Time `json:"createdAt"`
+					} `json:"content"`
+				} `json:"projectItem"`
+			} `json:"addProjectV2DraftIssue"`
+		}
 
-	var response struct {
-		AddProjectV2DraftIssue struct {
-			ProjectItem struct {
-				ID      string `json:"id"`
-				Content struct {
-					ID        string    `json:"id"`
-					Title     string    `json:"title"`
-					Body      string    `json:"body"`
-					CreatedAt time.Time `json:"createdAt"`
-				} `json:"content"`
-			} `json:"projectItem"`
-		} `json:"addProjectV2DraftIssue"`
-	}
+		if err := c.client.Do(mutation, variables, &response); err != nil {
+			fmt.Fprintf(os.Stderr, "CreateDraftIssue GraphQL error: %v\n", err)
+			// Classify the error
+			classified := apierrors.ClassifyError(err, 0)
+			return classified
+		}
 
-	err := c.client.Do(mutation, variables, &response)
+		result = &models.ProjectItem{
+			ID:        response.AddProjectV2DraftIssue.ProjectItem.ID,
+			ContentID: response.AddProjectV2DraftIssue.ProjectItem.Content.ID,
+			Type:      "DraftIssue",
+			Title:     response.AddProjectV2DraftIssue.ProjectItem.Content.Title,
+			Body:      response.AddProjectV2DraftIssue.ProjectItem.Content.Body,
+			CreatedAt: response.AddProjectV2DraftIssue.ProjectItem.Content.CreatedAt,
+			Assignees: []string{}, // Will be empty on creation
+		}
+
+		fmt.Fprintf(os.Stderr, "CreateDraftIssue success - ProjectItem.ID: %s, Content.ID: %s\n", result.ID, result.ContentID)
+		return nil
+	}, apierrors.DefaultRetryConfig())
+
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "CreateDraftIssue GraphQL error: %v\n", err)
-		return nil, fmt.Errorf("failed to create draft issue: %w", err)
+		return nil, err
 	}
 
-	item := &models.ProjectItem{
-		ID:        response.AddProjectV2DraftIssue.ProjectItem.ID,
-		ContentID: response.AddProjectV2DraftIssue.ProjectItem.Content.ID,
-		Type:      "DraftIssue",
-		Title:     response.AddProjectV2DraftIssue.ProjectItem.Content.Title,
-		Body:      response.AddProjectV2DraftIssue.ProjectItem.Content.Body,
-		CreatedAt: response.AddProjectV2DraftIssue.ProjectItem.Content.CreatedAt,
-		Assignees: []string{}, // Will be empty on creation
-	}
-
-	fmt.Fprintf(os.Stderr, "CreateDraftIssue success - ProjectItem.ID: %s, Content.ID: %s\n", item.ID, item.ContentID)
-	return item, nil
+	return result, nil
 }
 
-// UpdateDraftIssue updates a draft issue
+// UpdateDraftIssue updates a draft issue with retry logic
 func (c *Client) UpdateDraftIssue(itemID, title, body string, assigneeIDs []string) (*models.ProjectItem, error) {
 	fmt.Fprintf(os.Stderr, "\n>>> UpdateDraftIssue called\n")
 	fmt.Fprintf(os.Stderr, "DraftIssueID: %s\n", itemID)
@@ -281,80 +294,89 @@ func (c *Client) UpdateDraftIssue(itemID, title, body string, assigneeIDs []stri
 	fmt.Fprintf(os.Stderr, "Body length: %d\n", len(body))
 	fmt.Fprintf(os.Stderr, "AssigneeIDs: %v\n", assigneeIDs)
 	
-	mutation := `mutation($input: UpdateProjectV2DraftIssueInput!) {
-		updateProjectV2DraftIssue(input: $input) {
-			draftIssue {
-				id
-				title
-				body
-				updatedAt
-				assignees(first: 10) {
-					nodes {
-						login
+	var result *models.ProjectItem
+	
+	err := apierrors.Retry(func() error {
+		mutation := `mutation($input: UpdateProjectV2DraftIssueInput!) {
+			updateProjectV2DraftIssue(input: $input) {
+				draftIssue {
+					id
+					title
+					body
+					updatedAt
+					assignees(first: 10) {
+						nodes {
+							login
+						}
 					}
 				}
 			}
+		}`
+
+		mutationInput := map[string]interface{}{
+			"draftIssueId": itemID,
 		}
-	}`
 
-	mutationInput := map[string]interface{}{
-		"draftIssueId": itemID,
-	}
+		if title != "" {
+			mutationInput["title"] = title
+		}
+		if body != "" {
+			mutationInput["body"] = body
+		}
+		if len(assigneeIDs) > 0 {
+			mutationInput["assigneeIds"] = assigneeIDs
+		}
+		
+		fmt.Fprintf(os.Stderr, "Mutation input: %+v\n", mutationInput)
 
-	if title != "" {
-		mutationInput["title"] = title
-	}
-	if body != "" {
-		mutationInput["body"] = body
-	}
-	if len(assigneeIDs) > 0 {
-		mutationInput["assigneeIds"] = assigneeIDs
-	}
-	
-	fmt.Fprintf(os.Stderr, "Mutation input: %+v\n", mutationInput)
+		variables := map[string]interface{}{
+			"input": mutationInput,
+		}
 
-	variables := map[string]interface{}{
-		"input": mutationInput,
-	}
+		var response struct {
+			UpdateProjectV2DraftIssue struct {
+				DraftIssue struct {
+					ID        string    `json:"id"`
+					Title     string    `json:"title"`
+					Body      string    `json:"body"`
+					UpdatedAt time.Time `json:"updatedAt"`
+					Assignees struct {
+						Nodes []struct {
+							Login string `json:"login"`
+						} `json:"nodes"`
+					} `json:"assignees"`
+				} `json:"draftIssue"`
+			} `json:"updateProjectV2DraftIssue"`
+		}
 
-	var response struct {
-		UpdateProjectV2DraftIssue struct {
-			DraftIssue struct {
-				ID        string    `json:"id"`
-				Title     string    `json:"title"`
-				Body      string    `json:"body"`
-				UpdatedAt time.Time `json:"updatedAt"`
-				Assignees struct {
-					Nodes []struct {
-						Login string `json:"login"`
-					} `json:"nodes"`
-				} `json:"assignees"`
-			} `json:"draftIssue"`
-		} `json:"updateProjectV2DraftIssue"`
-	}
+		if err := c.client.Do(mutation, variables, &response); err != nil {
+			fmt.Fprintf(os.Stderr, "UpdateDraftIssue GraphQL error: %v\n", err)
+			return apierrors.ClassifyError(err, 0)
+		}
 
-	err := c.client.Do(mutation, variables, &response)
+		assignees := make([]string, len(response.UpdateProjectV2DraftIssue.DraftIssue.Assignees.Nodes))
+		for i, node := range response.UpdateProjectV2DraftIssue.DraftIssue.Assignees.Nodes {
+			assignees[i] = node.Login
+		}
+
+		result = &models.ProjectItem{
+			ID:        response.UpdateProjectV2DraftIssue.DraftIssue.ID,
+			Type:      "DraftIssue",
+			Title:     response.UpdateProjectV2DraftIssue.DraftIssue.Title,
+			Body:      response.UpdateProjectV2DraftIssue.DraftIssue.Body,
+			UpdatedAt: response.UpdateProjectV2DraftIssue.DraftIssue.UpdatedAt,
+			Assignees: assignees,
+		}
+
+		fmt.Fprintf(os.Stderr, "UpdateDraftIssue success - ID: %s, Assignees: %v\n", result.ID, result.Assignees)
+		return nil
+	}, apierrors.DefaultRetryConfig())
+
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "UpdateDraftIssue GraphQL error: %v\n", err)
-		return nil, fmt.Errorf("failed to update draft issue: %w", err)
+		return nil, err
 	}
 
-	assignees := make([]string, len(response.UpdateProjectV2DraftIssue.DraftIssue.Assignees.Nodes))
-	for i, node := range response.UpdateProjectV2DraftIssue.DraftIssue.Assignees.Nodes {
-		assignees[i] = node.Login
-	}
-
-	item := &models.ProjectItem{
-		ID:        response.UpdateProjectV2DraftIssue.DraftIssue.ID,
-		Type:      "DraftIssue",
-		Title:     response.UpdateProjectV2DraftIssue.DraftIssue.Title,
-		Body:      response.UpdateProjectV2DraftIssue.DraftIssue.Body,
-		UpdatedAt: response.UpdateProjectV2DraftIssue.DraftIssue.UpdatedAt,
-		Assignees: assignees,
-	}
-
-	fmt.Fprintf(os.Stderr, "UpdateDraftIssue success - ID: %s, Assignees: %v\n", item.ID, item.Assignees)
-	return item, nil
+	return result, nil
 }
 
 // DeleteProjectItem removes an item from a project
@@ -382,61 +404,71 @@ func (c *Client) DeleteProjectItem(projectID, itemID string) error {
 	return nil
 }
 
-// ConvertDraftIssueToIssue converts a draft issue to a real GitHub issue
+// ConvertDraftIssueToIssue converts a draft issue to a real GitHub issue with retry logic
 func (c *Client) ConvertDraftIssueToIssue(projectItemID, repositoryID string) (*models.ProjectItem, error) {
 	fmt.Fprintf(os.Stderr, "\n>>> ConvertDraftIssueToIssue called\n")
 	fmt.Fprintf(os.Stderr, "ProjectItemID: %s\n", projectItemID)
 	fmt.Fprintf(os.Stderr, "RepositoryID: %s\n", repositoryID)
 	
-	mutation := `mutation($input: ConvertProjectV2DraftIssueItemToIssueInput!) {
-		convertProjectV2DraftIssueItemToIssue(input: $input) {
-			projectV2Item {
-				id
+	var result *models.ProjectItem
+	
+	err := apierrors.Retry(func() error {
+		mutation := `mutation($input: ConvertProjectV2DraftIssueItemToIssueInput!) {
+			convertProjectV2DraftIssueItemToIssue(input: $input) {
+				projectV2Item {
+					id
+				}
+				newIssue {
+					id
+					number
+					title
+					url
+				}
 			}
-			issue {
-				id
-				number
-				title
-				url
-			}
+		}`
+
+		variables := map[string]interface{}{
+			"input": map[string]interface{}{
+				"projectV2ItemId": projectItemID,
+				"repositoryId":    repositoryID,
+			},
 		}
-	}`
 
-	variables := map[string]interface{}{
-		"input": map[string]interface{}{
-			"projectV2ItemId": projectItemID,
-			"repositoryId":    repositoryID,
-		},
-	}
+		var response struct {
+			ConvertProjectV2DraftIssueItemToIssue struct {
+				ProjectV2Item struct {
+					ID string `json:"id"`
+				} `json:"projectV2Item"`
+				NewIssue struct {
+					ID     string `json:"id"`
+					Number int    `json:"number"`
+					Title  string `json:"title"`
+					URL    string `json:"url"`
+				} `json:"newIssue"`
+			} `json:"convertProjectV2DraftIssueItemToIssue"`
+		}
 
-	var response struct {
-		ConvertProjectV2DraftIssueItemToIssue struct {
-			ProjectV2Item struct {
-				ID string `json:"id"`
-			} `json:"projectV2Item"`
-			Issue struct {
-				ID     string `json:"id"`
-				Number int    `json:"number"`
-				Title  string `json:"title"`
-				URL    string `json:"url"`
-			} `json:"issue"`
-		} `json:"convertProjectV2DraftIssueItemToIssue"`
-	}
+		if err := c.client.Do(mutation, variables, &response); err != nil {
+			fmt.Fprintf(os.Stderr, "ConvertDraftIssueToIssue GraphQL error: %v\n", err)
+			fmt.Fprintf(os.Stderr, "Variables sent: %+v\n", variables)
+			return apierrors.ClassifyError(err, 0)
+		}
 
-	err := c.client.Do(mutation, variables, &response)
+		result = &models.ProjectItem{
+			ID:     response.ConvertProjectV2DraftIssueItemToIssue.ProjectV2Item.ID,
+			Type:   "Issue",
+			Title:  response.ConvertProjectV2DraftIssueItemToIssue.NewIssue.Title,
+			Number: response.ConvertProjectV2DraftIssueItemToIssue.NewIssue.Number,
+			URL:    response.ConvertProjectV2DraftIssueItemToIssue.NewIssue.URL,
+		}
+
+		fmt.Fprintf(os.Stderr, "ConvertDraftIssueToIssue success - Issue #%d: %s\n", result.Number, result.URL)
+		return nil
+	}, apierrors.DefaultRetryConfig())
+
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "ConvertDraftIssueToIssue GraphQL error: %v\n", err)
-		return nil, fmt.Errorf("failed to convert draft issue: %w", err)
+		return nil, err
 	}
 
-	item := &models.ProjectItem{
-		ID:     response.ConvertProjectV2DraftIssueItemToIssue.ProjectV2Item.ID,
-		Type:   "Issue",
-		Title:  response.ConvertProjectV2DraftIssueItemToIssue.Issue.Title,
-		Number: response.ConvertProjectV2DraftIssueItemToIssue.Issue.Number,
-		URL:    response.ConvertProjectV2DraftIssueItemToIssue.Issue.URL,
-	}
-
-	fmt.Fprintf(os.Stderr, "ConvertDraftIssueToIssue success - Issue #%d: %s\n", item.Number, item.URL)
-	return item, nil
+	return result, nil
 }

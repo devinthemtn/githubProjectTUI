@@ -5,11 +5,14 @@ import (
 	"os"
 	"os/exec"
 	"runtime"
+	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/thomaskoefod/githubProjectTUI/internal/api"
 	"github.com/thomaskoefod/githubProjectTUI/internal/auth"
+	"github.com/thomaskoefod/githubProjectTUI/internal/config"
+	apierrors "github.com/thomaskoefod/githubProjectTUI/internal/errors"
 	"github.com/thomaskoefod/githubProjectTUI/internal/models"
 )
 
@@ -30,6 +33,7 @@ const (
 type Model struct {
 	currentView        view
 	apiClient          *api.Client
+	config             *config.Config
 	username           string
 	orgs               []string
 	currentOwner       string
@@ -90,6 +94,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case InitializedMsg:
 		m.apiClient = msg.Client
+		m.config = msg.Config
 		m.username = msg.Username
 		m.orgs = msg.Orgs
 		m.loading = false
@@ -172,6 +177,16 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.message = "Saving item..."
 		return m, saveItem(m.apiClient, msg)
 
+	case SaveAndConvertMsg:
+		m.loading = true
+		m.message = "Saving and preparing conversion..."
+		return m, saveAndConvert(m.apiClient, m.currentOwner, m.currentIsUser, msg)
+
+	case ItemSavedAndReadyToConvertMsg:
+		// Item saved, now show repository selector
+		m.loading = false
+		return m, LoadRepositoriesCmd(msg.Project, msg.Item)
+
 	case OpenURLMsg:
 		// Open URL in default browser
 		return m, openURL(msg.URL)
@@ -191,6 +206,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Reload project items
 		return m, loadProjectItems(m.apiClient, m.itemEditor.project)
 
+	case PartialSuccessMsg:
+		m.loading = false
+		m.err = nil
+		// Show warning message with success indicator
+		m.message = "⚠️ " + msg.Message
+		// Reload project items but keep warning visible
+		return m, loadProjectItems(m.apiClient, m.itemEditor.project)
+
 	case DeleteItemMsg:
 		m.loading = true
 		m.message = "Deleting item..."
@@ -208,14 +231,57 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, loadRepositories(m.apiClient, m.currentOwner, m.currentIsUser, msg.Project, msg.Item)
 
 	case RepositoriesLoadedMsg:
+		// Check if there's a saved default repository for this project (if config is available)
+		if m.config != nil {
+			if defaultRepoID, ok := m.config.GetDefaultRepository(msg.Project.ID); ok {
+				// Find the default repository in the list
+				for _, repo := range msg.Repositories {
+					if repo.ID == defaultRepoID {
+						m.loading = true
+						m.message = "Converting to issue in " + repo.Name + " (default)..."
+						return m, convertDraft(m.apiClient, ConvertDraftMsg{
+							Project:    msg.Project,
+							Item:       msg.Item,
+							Repository: repo,
+						})
+					}
+				}
+				// Default repo not found (maybe deleted), clear it from config
+				m.config.ClearDefaultRepository(msg.Project.ID)
+				if err := m.config.Save(); err != nil {
+					fmt.Fprintf(os.Stderr, "Warning: failed to save config: %v\n", err)
+				}
+			}
+		}
+		
+		// If only one repository, auto-select it and convert immediately
+		if len(msg.Repositories) == 1 {
+			m.loading = true
+			m.message = "Converting to issue in " + msg.Repositories[0].Name + "..."
+			return m, convertDraft(m.apiClient, ConvertDraftMsg{
+				Project:    msg.Project,
+				Item:       msg.Item,
+				Repository: msg.Repositories[0],
+			})
+		}
+		// Multiple repos - show selector
 		m.repositorySelector = NewRepositorySelectorModel(msg.Repositories, msg.Project, msg.Item)
 		m.repositorySelector.width = m.width
 		m.repositorySelector.height = m.height
 		m.currentView = viewRepositorySelector
 		m.loading = false
-		return m, nil
+		// Force window size update to selector
+		m.repositorySelector, _ = m.repositorySelector.Update(tea.WindowSizeMsg{Width: m.width, Height: m.height})
+		return m, m.repositorySelector.Init()
 
 	case ConvertDraftMsg:
+		// Save repository as default if requested (only if config is available)
+		if msg.SaveAsDefault && m.config != nil {
+			m.config.SetDefaultRepository(msg.Project.ID, msg.Repository.ID)
+			if err := m.config.Save(); err != nil {
+				fmt.Fprintf(os.Stderr, "Warning: failed to save config: %v\n", err)
+			}
+		}
 		m.loading = true
 		m.message = "Converting draft to issue..."
 		return m, convertDraft(m.apiClient, msg)
@@ -227,7 +293,30 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, loadProjectItems(m.apiClient, msg.Project)
 
 	case ErrorMsg:
-		m.err = msg.Err
+		// Extract user-friendly error message if it's an APIError
+		if apiErr, ok := msg.Err.(*apierrors.APIError); ok {
+			// Use the user-friendly message
+			m.err = fmt.Errorf("%s", apiErr.GetUserFriendlyMessage())
+			
+			// Add error type indicator
+			var icon string
+			switch apiErr.Type {
+			case apierrors.ErrorTypeRateLimit:
+				icon = "⏱️ "
+			case apierrors.ErrorTypePermission:
+				icon = "🔒 "
+			case apierrors.ErrorTypeValidation:
+				icon = "⚠️ "
+			case apierrors.ErrorTypeRetryable:
+				icon = "🔄 "
+			default:
+				icon = "❌ "
+			}
+			m.message = icon + apiErr.GetUserFriendlyMessage()
+		} else {
+			m.err = msg.Err
+			m.message = ""
+		}
 		m.loading = false
 		return m, nil
 
@@ -346,9 +435,18 @@ func (m Model) renderLoading() string {
 		Foreground(lipgloss.Color("#7D56F4")).
 		Padding(2, 4)
 
+	warningStyle := lipgloss.NewStyle().
+		Foreground(lipgloss.Color("#FFA500")).
+		Padding(2, 4)
+
 	msg := m.message
 	if msg == "" {
 		msg = "Initializing..."
+	}
+
+	// Use warning style if message contains warning icon
+	if strings.Contains(msg, "⚠️") || strings.Contains(msg, "🔒") {
+		return warningStyle.Render(msg)
 	}
 
 	return loadingStyle.Render(msg)
@@ -401,16 +499,23 @@ func (m Model) renderError() string {
 		Padding(1, 2)
 
 	var content string
+	
+	// If we have a friendly message, show it prominently
+	errorText := fmt.Sprintf("Error: %v", m.err)
+	if m.message != "" {
+		errorText = m.message
+	}
+	
 	if m.debugMode {
 		content = lipgloss.JoinVertical(lipgloss.Left,
-			errorStyle.Render(fmt.Sprintf("Error: %v", m.err)),
-			debugStyle.Render(fmt.Sprintf("Current view: %v\nUsername: %s\nOrgs: %v\nOwner: %s", 
-				m.currentView, m.username, m.orgs, m.currentOwner)),
+			errorStyle.Render(errorText),
+			debugStyle.Render(fmt.Sprintf("Current view: %v\nUsername: %s\nOrgs: %v\nOwner: %s\nTechnical error: %v", 
+				m.currentView, m.username, m.orgs, m.currentOwner, m.err)),
 			helpStyle.Render("Press esc to continue, q to quit, ctrl+d to hide debug"),
 		)
 	} else {
 		content = lipgloss.JoinVertical(lipgloss.Left,
-			errorStyle.Render(fmt.Sprintf("Error: %v", m.err)),
+			errorStyle.Render(errorText),
 			helpStyle.Render("Press esc to continue, q to quit, ctrl+d for debug"),
 		)
 	}
@@ -445,10 +550,14 @@ func initializeApp() tea.Msg {
 		orgs = []string{}
 	}
 
+	// Load config (always succeeds, returns empty config on any error)
+	cfg, _ := config.Load()
+
 	return InitializedMsg{
 		Client:   client,
 		Username: username,
 		Orgs:     orgs,
+		Config:   cfg,
 	}
 }
 
@@ -513,7 +622,7 @@ func saveItem(client *api.Client, msg SaveItemMsg) tea.Cmd {
 			})
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "ERROR: CreateDraftIssue failed: %v\n", err)
-				return ErrorMsg{Err: fmt.Errorf("failed to create item: %w", err)}
+				return ErrorMsg{Err: err}
 			}
 			
 			fmt.Fprintf(os.Stderr, "Created item - ID: %s, ContentID: %s\n", item.ID, item.ContentID)
@@ -525,7 +634,17 @@ func saveItem(client *api.Client, msg SaveItemMsg) tea.Cmd {
 				_, err = client.UpdateDraftIssue(item.ContentID, msg.Title, msg.Body, assigneeIDs)
 				if err != nil {
 					fmt.Fprintf(os.Stderr, "ERROR: UpdateDraftIssue failed: %v\n", err)
-					return ErrorMsg{Err: fmt.Errorf("item created but failed to assign user: %w", err)}
+					// Partial success: draft created but assignee failed
+					if apiErr, ok := err.(*apierrors.APIError); ok {
+						return PartialSuccessMsg{
+							Message:      "Draft issue created, but failed to assign user: " + apiErr.GetUserFriendlyMessage(),
+							WarningError: err,
+						}
+					}
+					return PartialSuccessMsg{
+						Message:      "Draft issue created, but failed to assign user",
+						WarningError: err,
+					}
 				}
 				fmt.Fprintf(os.Stderr, "Successfully assigned user\n")
 			}
@@ -646,12 +765,66 @@ func convertDraft(client *api.Client, msg ConvertDraftMsg) tea.Cmd {
 	}
 }
 
+func saveAndConvert(client *api.Client, owner string, isUser bool, msg SaveAndConvertMsg) tea.Cmd {
+	return func() tea.Msg {
+		// Get assignee node ID if username provided
+		var assigneeIDs []string
+		if msg.Assignee != "" {
+			nodeID, err := client.GetUserNodeID(msg.Assignee)
+			if err != nil {
+				return ErrorMsg{Err: fmt.Errorf("failed to get user ID for %s: %w", msg.Assignee, err)}
+			}
+			assigneeIDs = []string{nodeID}
+		}
+
+		var savedItem *models.ProjectItem
+		var err error
+
+		if msg.IsNewItem {
+			// Create draft issue (without assignees initially)
+			savedItem, err = client.CreateDraftIssue(models.CreateItemInput{
+				ProjectID:   msg.Project.ID,
+				Title:       msg.Title,
+				Body:        msg.Body,
+			})
+			if err != nil {
+				return ErrorMsg{Err: fmt.Errorf("failed to create item: %w", err)}
+			}
+			
+			// If assignees specified, update the draft issue with them
+			if len(assigneeIDs) > 0 {
+				_, err = client.UpdateDraftIssue(savedItem.ContentID, msg.Title, msg.Body, assigneeIDs)
+				if err != nil {
+					return ErrorMsg{Err: fmt.Errorf("item created but failed to assign user: %w", err)}
+				}
+			}
+		} else {
+			// For updates, use ContentID
+			contentID := msg.Item.ContentID
+			if contentID == "" {
+				contentID = msg.Item.ID
+			}
+			savedItem, err = client.UpdateDraftIssue(contentID, msg.Title, msg.Body, assigneeIDs)
+			if err != nil {
+				return ErrorMsg{Err: fmt.Errorf("failed to update item: %w", err)}
+			}
+		}
+
+		// Item saved successfully, now ready to convert
+		return ItemSavedAndReadyToConvertMsg{
+			Project: msg.Project,
+			Item:    *savedItem,
+		}
+	}
+}
+
 // Messages
 
 type InitializedMsg struct {
 	Client   *api.Client
 	Username string
 	Orgs     []string
+	Config   *config.Config
 }
 
 type ProjectsLoadedMsg struct {
@@ -670,6 +843,16 @@ type ItemDeletedMsg struct {
 }
 
 type ProjectCreatedMsg struct{}
+
+type ItemSavedAndReadyToConvertMsg struct {
+	Project models.Project
+	Item    models.ProjectItem
+}
+
+type PartialSuccessMsg struct {
+	Message      string
+	WarningError error
+}
 
 type ErrorMsg struct {
 	Err error
